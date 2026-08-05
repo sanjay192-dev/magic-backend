@@ -27,6 +27,7 @@
     "multer": "^2.2.0",
     "streamifier": "^0.1.1",
     "exceljs": "^4.4.0",
+"bcryptjs": "^3.0.3",
     "dotenv": "^17.2.3"
   }
 }
