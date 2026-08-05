@@ -1,10 +1,11 @@
+require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cloudinary = require('cloudinary').v2;
 const streamifier = require('streamifier');
 const cors = require('cors');
 const multer = require('multer');
-const excelJS = require('exceljs'); // Added ExcelJS for exporting reports
+const excelJS = require('exceljs');
 
 const app = express();
 app.use(express.json());
@@ -14,13 +15,12 @@ app.use(cors());
 const upload = multer();
 
 // ==========================================
-// 1. PROVIDED CONNECTIONS & CONFIGURATION
+// 1. CLOUDINARY CONFIGURATION
 // ==========================================
-
 cloudinary.config({
-  cloud_name: "dppiuypop",
-  api_key: "412712715735329",
-  api_secret: "m04IUY0-awwtr4YoS-1xvxOOIzU",
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dppiuypop",
+  api_key: process.env.CLOUDINARY_API_KEY || "412712715735329",
+  api_secret: process.env.CLOUDINARY_API_SECRET || "m04IUY0-awwtr4YoS-1xvxOOIzU",
 });
 
 function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
@@ -36,24 +36,43 @@ function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
   });
 }
 
-// ----------------- MongoDB -----------------
-const MONGO_URL = 'mongodb+srv://abc:1234@cluster0.nnjwt12.mongodb.net/security';
-mongoose.connect(MONGO_URL)
-  .then(() => console.log('✅ MongoDB connected'))
-  .catch(err => {
-    console.error('MongoDB connection error:', err);
-    process.exit(1);
-  });
+// ==========================================
+// 2. MONGODB CONNECTION (Serverless Optimized)
+// ==========================================
+const MONGO_URL = process.env.MONGO_URL || 'mongodb+srv://abc:1234@cluster0.nnjwt12.mongodb.net/security';
+let isConnected = false;
+
+async function connectDB() {
+  if (isConnected) return;
+  
+  try {
+    await mongoose.connect(MONGO_URL);
+    isConnected = true;
+    console.log('✅ MongoDB connected');
+  } catch (err) {
+    console.error('❌ MongoDB connection error:', err);
+    throw err;
+  }
+}
+
+// Middleware: Ensure database is connected before processing any request
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    return res.status(500).json({ error: "Database connection failed" });
+  }
+});
 
 // ==========================================
-// 2. MONGODB SCHEMAS & MODELS
+// 3. MONGODB SCHEMAS & MODELS
 // ==========================================
-
 const facultySchema = new mongoose.Schema({
   name: String,
   department: String
 });
-const Faculty = mongoose.model('Faculty', facultySchema);
+const Faculty = mongoose.models.Faculty || mongoose.model('Faculty', facultySchema);
 
 const studentSchema = new mongoose.Schema({
   name: String,
@@ -62,7 +81,7 @@ const studentSchema = new mongoose.Schema({
   section: String,
   faceEmbedding: [Number] 
 });
-const Student = mongoose.model('Student', studentSchema);
+const Student = mongoose.models.Student || mongoose.model('Student', studentSchema);
 
 const sessionSchema = new mongoose.Schema({
   facultyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Faculty' },
@@ -72,12 +91,12 @@ const sessionSchema = new mongoose.Schema({
     lat: { type: Number, required: true }, 
     lng: { type: Number, required: true } 
   },
-  allowedRadius: { type: Number, required: true }, // Dynamic radius
+  allowedRadius: { type: Number, required: true },
   startTime: { type: Date, default: Date.now },
   expiresAt: { type: Date, required: true },
   isActive: { type: Boolean, default: true }
 });
-const Session = mongoose.model('Session', sessionSchema);
+const Session = mongoose.models.Session || mongoose.model('Session', sessionSchema);
 
 const attendanceSchema = new mongoose.Schema({
   sessionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Session' },
@@ -88,30 +107,28 @@ const attendanceSchema = new mongoose.Schema({
   timestamp: { type: Date, default: Date.now },
   status: { type: String, enum: ['Present', 'Denied'], default: 'Present' }
 });
-const Attendance = mongoose.model('Attendance', attendanceSchema);
+const Attendance = mongoose.models.Attendance || mongoose.model('Attendance', attendanceSchema);
 
 // ==========================================
-// 3. HELPER FUNCTIONS
+// 4. HELPER FUNCTIONS
 // ==========================================
-
-// Calculate distance between two coordinates in meters
 function getDistanceInMeters(lat1, lon1, lat2, lon2) {
   const R = 6371e3; // Earth's radius in meters
   const toRadians = (deg) => deg * (Math.PI / 180);
-  
+
   const dLat = toRadians(lat2 - lat1);
   const dLon = toRadians(lon2 - lon1);
-  
+
   const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
             Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) *
             Math.sin(dLon/2) * Math.sin(dLon/2);
-            
+
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c; 
 }
 
 // ==========================================
-// 4. API ROUTES (FACULTY & STUDENT)
+// 5. API ROUTES
 // ==========================================
 
 // --- FACULTY: Start an Attendance Session ---
@@ -121,7 +138,6 @@ app.post('/api/faculty/start-session', async (req, res) => {
 
     const finalDuration = durationMinutes || 5; 
     const finalRadius = allowedRadius || 50;    
-
     const expiresAt = new Date(Date.now() + finalDuration * 60000);
 
     const session = await Session.create({
@@ -145,7 +161,6 @@ app.post('/api/faculty/start-session', async (req, res) => {
   }
 });
 
-
 // --- STUDENT: Mark Attendance ---
 app.post('/api/student/mark-attendance', upload.single('image'), async (req, res) => {
   try {
@@ -157,16 +172,16 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
     // 1. Validate Session & Expiry
     const session = await Session.findById(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
-    
+
     if (new Date() > session.expiresAt || !session.isActive) {
       return res.status(403).json({ error: "Session has expired or is inactive" });
     }
 
-    // 2. Verify GPS Location (Dynamic Radius Check)
+    // 2. Verify GPS Location
     const studentLat = parseFloat(lat);
     const studentLng = parseFloat(lng);
     const distance = getDistanceInMeters(session.location.lat, session.location.lng, studentLat, studentLng);
-    
+
     if (distance > session.allowedRadius) {
       return res.status(403).json({ 
         error: `Access Denied: You are ${Math.round(distance)} meters away. Must be within ${session.allowedRadius} meters.`, 
@@ -174,13 +189,13 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       });
     }
 
-    // 3. Security: Check for Duplicate Device
+    // 3. Check for Duplicate Device
     const existingDevice = await Attendance.findOne({ sessionId, deviceFingerprint });
     if (existingDevice) {
       return res.status(403).json({ error: "Access Denied: Device already used for attendance in this session" });
     }
 
-    // 4. Security: Check for Duplicate Roll Number
+    // 4. Check for Duplicate Roll Number
     const existingRoll = await Attendance.findOne({ sessionId, rollNumber });
     if (existingRoll) {
       return res.status(409).json({ error: "Already marked: Attendance exists for this roll number" });
@@ -209,7 +224,6 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
     res.status(500).json({ error: "Failed to mark attendance", details: error.message });
   }
 });
-
 
 // --- FACULTY: View Dashboard (Live Attendance) ---
 app.get('/api/faculty/dashboard/:sessionId', async (req, res) => {
@@ -269,7 +283,6 @@ app.get('/api/faculty/export-excel/:sessionId', async (req, res) => {
 
     attendees.forEach((attendee, index) => {
       const attendanceDate = new Date(attendee.timestamp);
-      
       worksheet.addRow({
         sno: index + 1,
         name: attendee.studentName,
@@ -296,4 +309,17 @@ app.get('/api/faculty/export-excel/:sessionId', async (req, res) => {
   }
 });
 
+// ==========================================
+// 6. SERVER INITIALIZATION
+// ==========================================
+
+// If running locally, start the server
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+}
+
+// Export for serverless environments (like Vercel or AWS Lambda)
 module.exports = app;
