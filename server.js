@@ -6,6 +6,7 @@ const streamifier = require('streamifier');
 const cors = require('cors');
 const multer = require('multer');
 const excelJS = require('exceljs');
+const bcrypt = require('bcryptjs'); // Added bcryptjs for auth
 
 const app = express();
 app.use(express.json());
@@ -37,14 +38,13 @@ function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
 }
 
 // ==========================================
-// 2. MONGODB CONNECTION (Serverless Optimized)
+// 2. MONGODB CONNECTION
 // ==========================================
 const MONGO_URL = process.env.MONGO_URL || 'mongodb+srv://abc:1234@cluster0.nnjwt12.mongodb.net/security';
 let isConnected = false;
 
 async function connectDB() {
   if (isConnected) return;
-  
   try {
     await mongoose.connect(MONGO_URL);
     isConnected = true;
@@ -55,7 +55,6 @@ async function connectDB() {
   }
 }
 
-// Middleware: Ensure database is connected before processing any request
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -69,7 +68,9 @@ app.use(async (req, res, next) => {
 // 3. MONGODB SCHEMAS & MODELS
 // ==========================================
 const facultySchema = new mongoose.Schema({
-  name: String,
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true }, // Will store bcrypt hash
   department: String
 });
 const Faculty = mongoose.models.Faculty || mongoose.model('Faculty', facultySchema);
@@ -113,16 +114,13 @@ const Attendance = mongoose.models.Attendance || mongoose.model('Attendance', at
 // 4. HELPER FUNCTIONS
 // ==========================================
 function getDistanceInMeters(lat1, lon1, lat2, lon2) {
-  const R = 6371e3; // Earth's radius in meters
+  const R = 6371e3;
   const toRadians = (deg) => deg * (Math.PI / 180);
-
   const dLat = toRadians(lat2 - lat1);
   const dLon = toRadians(lon2 - lon1);
-
   const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
             Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) *
             Math.sin(dLon/2) * Math.sin(dLon/2);
-
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c; 
 }
@@ -130,6 +128,54 @@ function getDistanceInMeters(lat1, lon1, lat2, lon2) {
 // ==========================================
 // 5. API ROUTES
 // ==========================================
+
+// --- FACULTY AUTHENTICATION ---
+app.post('/api/faculty/register', async (req, res) => {
+  try {
+    const { name, email, password, department } = req.body;
+
+    const existingFaculty = await Faculty.findOne({ email });
+    if (existingFaculty) return res.status(400).json({ error: "Email already registered" });
+
+    // Hash the password using bcryptjs
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    const newFaculty = await Faculty.create({
+      name,
+      email,
+      password: hashedPassword,
+      department
+    });
+
+    res.status(201).json({ message: "Registration successful" });
+  } catch (error) {
+    res.status(500).json({ error: "Registration failed", details: error.message });
+  }
+});
+
+app.post('/api/faculty/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const faculty = await Faculty.findOne({ email });
+    if (!faculty) return res.status(404).json({ error: "Faculty not found" });
+
+    // Compare provided password with stored hash
+    const isMatch = await bcrypt.compare(password, faculty.password);
+    if (!isMatch) return res.status(401).json({ error: "Invalid credentials" });
+
+    res.status(200).json({ 
+      message: "Login successful", 
+      facultyId: faculty._id,
+      name: faculty.name,
+      department: faculty.department
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Login failed", details: error.message });
+  }
+});
+
 
 // --- FACULTY: Start an Attendance Session ---
 app.post('/api/faculty/start-session', async (req, res) => {
@@ -169,7 +215,6 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
 
     if (!imageBuffer) return res.status(400).json({ error: "Image file is required" });
 
-    // 1. Validate Session & Expiry
     const session = await Session.findById(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
 
@@ -177,7 +222,6 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       return res.status(403).json({ error: "Session has expired or is inactive" });
     }
 
-    // 2. Verify GPS Location
     const studentLat = parseFloat(lat);
     const studentLng = parseFloat(lng);
     const distance = getDistanceInMeters(session.location.lat, session.location.lng, studentLat, studentLng);
@@ -189,22 +233,18 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       });
     }
 
-    // 3. Check for Duplicate Device
     const existingDevice = await Attendance.findOne({ sessionId, deviceFingerprint });
     if (existingDevice) {
       return res.status(403).json({ error: "Access Denied: Device already used for attendance in this session" });
     }
 
-    // 4. Check for Duplicate Roll Number
     const existingRoll = await Attendance.findOne({ sessionId, rollNumber });
     if (existingRoll) {
       return res.status(409).json({ error: "Already marked: Attendance exists for this roll number" });
     }
 
-    // 5. Upload Image to Cloudinary
     const uploadResult = await uploadBufferToCloudinary(imageBuffer, 'attendance_captures');
 
-    // 6. Save Attendance
     const attendanceRecord = await Attendance.create({
       sessionId,
       studentName: name,
@@ -214,11 +254,7 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       status: 'Present'
     });
 
-    res.status(200).json({ 
-      message: "Attendance Saved Successfully", 
-      attendance: attendanceRecord 
-    });
-
+    res.status(200).json({ message: "Attendance Saved Successfully", attendance: attendanceRecord });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to mark attendance", details: error.message });
@@ -229,7 +265,6 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
 app.get('/api/faculty/dashboard/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
-
     const attendees = await Attendance.find({ sessionId }).sort({ timestamp: 1 });
     const session = await Session.findById(sessionId);
 
@@ -259,12 +294,10 @@ app.get('/api/faculty/dashboard/:sessionId', async (req, res) => {
 app.get('/api/faculty/export-excel/:sessionId', async (req, res) => {
   try {
     const { sessionId } = req.params;
-
     const session = await Session.findById(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
 
     const attendees = await Attendance.find({ sessionId }).sort({ timestamp: 1 });
-
     const workbook = new excelJS.Workbook();
     const worksheet = workbook.addWorksheet('Attendance Log');
 
@@ -277,9 +310,7 @@ app.get('/api/faculty/export-excel/:sessionId', async (req, res) => {
       { header: 'Status', key: 'status', width: 15 }
     ];
 
-    worksheet.getRow(1).eachCell((cell) => {
-      cell.font = { bold: true };
-    });
+    worksheet.getRow(1).eachCell((cell) => { cell.font = { bold: true }; });
 
     attendees.forEach((attendee, index) => {
       const attendanceDate = new Date(attendee.timestamp);
@@ -293,33 +324,19 @@ app.get('/api/faculty/export-excel/:sessionId', async (req, res) => {
       });
     });
 
-    const department = session.department || "Dept";
-    const section = session.section || "Sec";
-    const fileName = `${department}_${section}_Attendance.xlsx`;
-
+    const fileName = `${session.department || 'Dept'}_${session.section || 'Sec'}_Attendance.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename=${fileName}`);
 
     await workbook.xlsx.write(res);
     res.end();
-
   } catch (error) {
-    console.error("Excel Export Error:", error);
     res.status(500).json({ error: "Failed to export Excel sheet", details: error.message });
   }
 });
 
-// ==========================================
-// 6. SERVER INITIALIZATION
-// ==========================================
-
-// If running locally, start the server
 if (require.main === module) {
   const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-  });
+  app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
 }
-
-// Export for serverless environments (like Vercel or AWS Lambda)
 module.exports = app;
