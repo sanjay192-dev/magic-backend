@@ -296,10 +296,4 @@ app.get('/api/faculty/export-excel/:sessionId', async (req, res) => {
   }
 });
 
-// ==========================================
-// 5. SERVER INITIALIZATION
-// ==========================================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Attendance Server running on port ${PORT}`);
-});
+module.exports = app;
