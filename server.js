@@ -30,7 +30,7 @@ function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
     const uploadStream = cloudinary.uploader.upload_stream(
       { 
         folder,
-        faces: true, 
+        faces: true, // Forces Cloudinary to verify a face is in the image
         transformation: [
           { effect: "improve" },        
           { effect: "brightness:30" },  
@@ -105,8 +105,8 @@ const studentSchema = new mongoose.Schema({
   name: String,
   rollNumber: { type: String, unique: true },
   department: String,
-  section: String,
-  faceEmbedding: { type: [Number], required: true } // Now strictly required for verification
+  section: String
+  // faceEmbedding removed as MediaPipe CDN handles liveness on frontend without embeddings
 });
 const Student = mongoose.models.Student || mongoose.model('Student', studentSchema);
 
@@ -137,10 +137,8 @@ const attendanceSchema = new mongoose.Schema({
 const Attendance = mongoose.models.Attendance || mongoose.model('Attendance', attendanceSchema);
 
 // ==========================================
-// 5. MATH & VERIFICATION HELPER FUNCTIONS
+// 5. GPS MATH HELPER FUNCTION
 // ==========================================
-
-// GPS Distance Calculation
 function getDistanceInMeters(lat1, lon1, lat2, lon2) {
   const R = 6371e3;
   const toRadians = (deg) => deg * (Math.PI / 180);
@@ -151,16 +149,6 @@ function getDistanceInMeters(lat1, lon1, lat2, lon2) {
             Math.sin(dLon/2) * Math.sin(dLon/2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c; 
-}
-
-// Biological Face Verification (Euclidean Distance)
-function calculateFaceSimilarity(descriptor1, descriptor2) {
-  if (descriptor1.length !== descriptor2.length) return 1.0; 
-  let sum = 0;
-  for (let i = 0; i < descriptor1.length; i++) {
-    sum += Math.pow(descriptor1[i] - descriptor2[i], 2);
-  }
-  return Math.sqrt(sum);
 }
 
 // ==========================================
@@ -240,12 +228,6 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
     const studentIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     if (!imageBuffer) return res.status(400).json({ error: "Image file is required" });
-    
-    // REQUIREMENT: Frontend must send the face descriptor array parsed as a string
-    if (!req.body.faceDescriptor) {
-      return res.status(400).json({ error: "Face Descriptor missing. Biometric scan required." });
-    }
-    const submittedDescriptor = JSON.parse(req.body.faceDescriptor);
 
     // 1. Session Validations
     const session = await Session.findById(sessionId);
@@ -254,22 +236,8 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       return res.status(403).json({ error: "Session has expired" });
     }
 
-    // 2. Registered Student Biometric Lookup
-    const registeredStudent = await Student.findOne({ rollNumber: rollNumber.toUpperCase() });
-    if (!registeredStudent) {
-      return res.status(404).json({ error: "Roll Number not found in database." });
-    }
-
-    // 3. Mathematical Face Verification
-    // Calculates Euclidean Distance: distance > 0.5 is a mismatch
-    const FACE_MATCH_THRESHOLD = 0.5; 
-    const distanceScore = calculateFaceSimilarity(submittedDescriptor, registeredStudent.faceEmbedding);
-    
-    if (distanceScore > FACE_MATCH_THRESHOLD) {
-      return res.status(403).json({ error: "BIOMETRIC REJECTION: The face in the camera does not match the registered face for this Roll Number." });
-    }
-
-    // 4. Strict Multiple Submissions Block
+    // 2. Strict Multiple Submissions Block (Proxy Prevention)
+    // Checks if the Device OR the Roll Number has already been used in this exact session.
     const existingEntry = await Attendance.findOne({
       sessionId,
       $or: [ { rollNumber }, { deviceFingerprint } ]
@@ -283,14 +251,16 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       }
     }
 
-    // 5. GPS Radius Validation
+    // 3. GPS Radius Validation
     const distance = getDistanceInMeters(session.location.lat, session.location.lng, parseFloat(lat), parseFloat(lng));
     if (distance > session.allowedRadius) {
       return res.status(403).json({ error: `Access Denied: You are ${Math.round(distance)}m away. Must be within ${session.allowedRadius}m.` });
     }
 
-    // 6. Cloudinary Night-Vision Upload & Liveness Verification
+    // 4. Cloudinary Night-Vision Upload & Face Validation
     const uploadResult = await uploadBufferToCloudinary(imageBuffer, 'attendance_captures');
+    
+    // Ensure Cloudinary actually sees a face (secondary check to complement frontend MediaPipe)
     if (!uploadResult.faces || uploadResult.faces.length === 0) {
       return res.status(400).json({ error: "No face detected in the environment. Please ensure good lighting." });
     }
@@ -298,7 +268,7 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       return res.status(400).json({ error: "Multiple faces detected. Only you should be in the frame." });
     }
 
-    // 7. Save Verified Data
+    // 5. Save Verified Data
     const attendanceRecord = await Attendance.create({
       sessionId,
       studentName: name,
