@@ -7,18 +7,17 @@ const cors = require('cors');
 const multer = require('multer');
 const excelJS = require('exceljs');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken'); // Added for API security
+const jwt = require('jsonwebtoken'); 
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
 const upload = multer();
-
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_attendance_key';
 
 // ==========================================
-// 1. CLOUDINARY CONFIGURATION & FACE DETECTION
+// 1. CLOUDINARY CONFIGURATION (Face Detection & Enhancement)
 // ==========================================
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dppiuypop",
@@ -31,10 +30,10 @@ function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
     const uploadStream = cloudinary.uploader.upload_stream(
       { 
         folder,
-        faces: true, // Force Cloudinary to detect and return face coordinates
+        faces: true, 
         transformation: [
-          { effect: "improve" },        // Auto-correct lighting for night-time photos
-          { effect: "brightness:30" },  // Boost brightness artificially
+          { effect: "improve" },        
+          { effect: "brightness:30" },  
           { crop: "limit", width: 800, height: 800 } 
         ]
       },
@@ -84,7 +83,7 @@ const authMiddleware = (req, res, next) => {
   const token = authHeader.split(' ')[1];
   try {
     const verified = jwt.verify(token, JWT_SECRET);
-    req.facultyId = verified.id; // Inject faculty ID into request
+    req.facultyId = verified.id; 
     next();
   } catch (error) {
     res.status(401).json({ error: "Invalid or expired token" });
@@ -102,10 +101,19 @@ const facultySchema = new mongoose.Schema({
 });
 const Faculty = mongoose.models.Faculty || mongoose.model('Faculty', facultySchema);
 
+const studentSchema = new mongoose.Schema({
+  name: String,
+  rollNumber: { type: String, unique: true },
+  department: String,
+  section: String,
+  faceEmbedding: { type: [Number], required: true } // Now strictly required for verification
+});
+const Student = mongoose.models.Student || mongoose.model('Student', studentSchema);
+
 const sessionSchema = new mongoose.Schema({
   facultyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Faculty' },
-  department: { type: String, required: true }, // Can be "ALL" or specific dept
-  section: { type: String, required: true },    // Can be "ALL" or specific sec
+  department: { type: String, required: true }, 
+  section: { type: String, required: true },    
   location: { lat: { type: Number, required: true }, lng: { type: Number, required: true } },
   allowedRadius: { type: Number, required: true },
   startTime: { type: Date, default: Date.now },
@@ -118,10 +126,10 @@ const attendanceSchema = new mongoose.Schema({
   sessionId: { type: mongoose.Schema.Types.ObjectId, ref: 'Session' },
   studentName: String,
   rollNumber: String,
-  department: String, // Individual student's dept for segregation
-  section: String,    // Individual student's sec for segregation
+  department: String, 
+  section: String,    
   deviceFingerprint: String,
-  ipAddress: String,  // Extra layer to stop multiple submissions
+  ipAddress: String,  
   capturedImageUrl: String,
   timestamp: { type: Date, default: Date.now },
   status: { type: String, enum: ['Present', 'Denied'], default: 'Present' }
@@ -129,8 +137,10 @@ const attendanceSchema = new mongoose.Schema({
 const Attendance = mongoose.models.Attendance || mongoose.model('Attendance', attendanceSchema);
 
 // ==========================================
-// 5. HELPER FUNCTIONS
+// 5. MATH & VERIFICATION HELPER FUNCTIONS
 // ==========================================
+
+// GPS Distance Calculation
 function getDistanceInMeters(lat1, lon1, lat2, lon2) {
   const R = 6371e3;
   const toRadians = (deg) => deg * (Math.PI / 180);
@@ -141,6 +151,16 @@ function getDistanceInMeters(lat1, lon1, lat2, lon2) {
             Math.sin(dLon/2) * Math.sin(dLon/2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c; 
+}
+
+// Biological Face Verification (Euclidean Distance)
+function calculateFaceSimilarity(descriptor1, descriptor2) {
+  if (descriptor1.length !== descriptor2.length) return 1.0; 
+  let sum = 0;
+  for (let i = 0; i < descriptor1.length; i++) {
+    sum += Math.pow(descriptor1[i] - descriptor2[i], 2);
+  }
+  return Math.sqrt(sum);
 }
 
 // ==========================================
@@ -173,7 +193,6 @@ app.post('/api/faculty/login', async (req, res) => {
     const isMatch = await bcrypt.compare(password, faculty.password);
     if (!isMatch) return res.status(401).json({ error: "Invalid credentials" });
 
-    // Generate JWT Token
     const token = jwt.sign({ id: faculty._id }, JWT_SECRET, { expiresIn: '8h' });
 
     res.status(200).json({ 
@@ -191,11 +210,10 @@ app.post('/api/faculty/login', async (req, res) => {
 app.post('/api/faculty/start-session', authMiddleware, async (req, res) => {
   try {
     const { department, section, lat, lng, durationMinutes, allowedRadius } = req.body;
-
     const expiresAt = new Date(Date.now() + (durationMinutes || 5) * 60000);
 
     const session = await Session.create({
-      facultyId: req.facultyId, // Extracted from JWT middleware
+      facultyId: req.facultyId, 
       department: department || "ALL", 
       section: section || "ALL",
       location: { lat, lng },
@@ -214,15 +232,20 @@ app.post('/api/faculty/start-session', authMiddleware, async (req, res) => {
   }
 });
 
-// --- STUDENT: Mark Attendance ---
+// --- STUDENT: Mark Attendance (HIGH SECURITY) ---
 app.post('/api/student/mark-attendance', upload.single('image'), async (req, res) => {
   try {
-    // Requires student's personal department/section to segregate later
     const { sessionId, rollNumber, name, department, section, lat, lng, deviceFingerprint } = req.body;
     const imageBuffer = req.file?.buffer;
     const studentIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 
     if (!imageBuffer) return res.status(400).json({ error: "Image file is required" });
+    
+    // REQUIREMENT: Frontend must send the face descriptor array parsed as a string
+    if (!req.body.faceDescriptor) {
+      return res.status(400).json({ error: "Face Descriptor missing. Biometric scan required." });
+    }
+    const submittedDescriptor = JSON.parse(req.body.faceDescriptor);
 
     // 1. Session Validations
     const session = await Session.findById(sessionId);
@@ -231,13 +254,25 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       return res.status(403).json({ error: "Session has expired" });
     }
 
-    // 2. Strict Multiple Submissions Block (Check Fingerprint OR Roll Number)
+    // 2. Registered Student Biometric Lookup
+    const registeredStudent = await Student.findOne({ rollNumber: rollNumber.toUpperCase() });
+    if (!registeredStudent) {
+      return res.status(404).json({ error: "Roll Number not found in database." });
+    }
+
+    // 3. Mathematical Face Verification
+    // Calculates Euclidean Distance: distance > 0.5 is a mismatch
+    const FACE_MATCH_THRESHOLD = 0.5; 
+    const distanceScore = calculateFaceSimilarity(submittedDescriptor, registeredStudent.faceEmbedding);
+    
+    if (distanceScore > FACE_MATCH_THRESHOLD) {
+      return res.status(403).json({ error: "BIOMETRIC REJECTION: The face in the camera does not match the registered face for this Roll Number." });
+    }
+
+    // 4. Strict Multiple Submissions Block
     const existingEntry = await Attendance.findOne({
       sessionId,
-      $or: [
-        { rollNumber }, 
-        { deviceFingerprint }
-      ]
+      $or: [ { rollNumber }, { deviceFingerprint } ]
     });
 
     if (existingEntry) {
@@ -248,24 +283,22 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       }
     }
 
-    // 3. GPS Radius Validation
+    // 5. GPS Radius Validation
     const distance = getDistanceInMeters(session.location.lat, session.location.lng, parseFloat(lat), parseFloat(lng));
     if (distance > session.allowedRadius) {
       return res.status(403).json({ error: `Access Denied: You are ${Math.round(distance)}m away. Must be within ${session.allowedRadius}m.` });
     }
 
-    // 4. Cloudinary Night-Vision Upload & Face Validation
+    // 6. Cloudinary Night-Vision Upload & Liveness Verification
     const uploadResult = await uploadBufferToCloudinary(imageBuffer, 'attendance_captures');
-    
-    // Cloudinary returns an array of faces. Ensure exactly 1 face is found.
     if (!uploadResult.faces || uploadResult.faces.length === 0) {
-      return res.status(400).json({ error: "Face Recognition Failed: No face detected. Please face the camera directly." });
+      return res.status(400).json({ error: "No face detected in the environment. Please ensure good lighting." });
     }
     if (uploadResult.faces.length > 1) {
-      return res.status(400).json({ error: "Face Recognition Failed: Multiple faces detected. Only you should be in the frame." });
+      return res.status(400).json({ error: "Multiple faces detected. Only you should be in the frame." });
     }
 
-    // 5. Save Data
+    // 7. Save Verified Data
     const attendanceRecord = await Attendance.create({
       sessionId,
       studentName: name,
@@ -278,7 +311,7 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       status: 'Present'
     });
 
-    res.status(200).json({ message: "Attendance Saved Successfully" });
+    res.status(200).json({ message: "Attendance Verified & Saved Successfully" });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to mark attendance", details: error.message });
@@ -294,11 +327,9 @@ app.get('/api/faculty/dashboard/:sessionId', authMiddleware, async (req, res) =>
 
     const attendees = await Attendance.find({ sessionId }).sort({ department: 1, section: 1, timestamp: 1 });
 
-    // Segregate data automatically by Department and Section
     const segregatedData = attendees.reduce((acc, curr) => {
       const groupKey = `${curr.department} - Section ${curr.section}`;
       if (!acc[groupKey]) acc[groupKey] = [];
-      
       acc[groupKey].push({
         name: curr.studentName,
         rollNumber: curr.rollNumber,
@@ -329,17 +360,12 @@ app.get('/api/faculty/export-excel/:sessionId', authMiddleware, async (req, res)
     const session = await Session.findById(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
 
-    // Fetch and sort by department, then section, then time
     const attendees = await Attendance.find({ sessionId }).sort({ department: 1, section: 1, timestamp: 1 });
     const workbook = new excelJS.Workbook();
-    
-    // Group attendees for separate sheets or one organized sheet
     const departments = [...new Set(attendees.map(a => a.department))];
 
-    // Create a separate sheet for each department found in the session
     departments.forEach(dept => {
       const worksheet = workbook.addWorksheet(`${dept} Attendance`);
-      
       worksheet.columns = [
         { header: 'S.No', key: 'sno', width: 10 },
         { header: 'Name', key: 'name', width: 25 },
@@ -366,10 +392,7 @@ app.get('/api/faculty/export-excel/:sessionId', authMiddleware, async (req, res)
       });
     });
 
-    // If no attendees yet, create a default empty sheet
-    if (departments.length === 0) {
-      workbook.addWorksheet('Empty Session');
-    }
+    if (departments.length === 0) workbook.addWorksheet('Empty Session');
 
     const fileName = `Session_${sessionId.toString().substring(0,6)}_Attendance.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
