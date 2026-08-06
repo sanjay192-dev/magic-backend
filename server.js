@@ -30,7 +30,7 @@ function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
     const uploadStream = cloudinary.uploader.upload_stream(
       { 
         folder,
-        faces: true, // Forces Cloudinary to verify a face is in the image
+        faces: true, 
         transformation: [
           { effect: "improve" },        
           { effect: "brightness:30" },  
@@ -154,7 +154,6 @@ function getDistanceInMeters(lat1, lon1, lat2, lon2) {
 // 6. API ROUTES
 // ==========================================
 
-// --- FACULTY AUTHENTICATION ---
 app.post('/api/faculty/register', async (req, res) => {
   try {
     const { name, email, password, department } = req.body;
@@ -193,7 +192,6 @@ app.post('/api/faculty/login', async (req, res) => {
   }
 });
 
-// --- FACULTY: Start Session (PROTECTED) ---
 app.post('/api/faculty/start-session', authMiddleware, async (req, res) => {
   try {
     const { department, section, lat, lng, durationMinutes, allowedRadius } = req.body;
@@ -219,7 +217,7 @@ app.post('/api/faculty/start-session', authMiddleware, async (req, res) => {
   }
 });
 
-// --- STUDENT: Mark Attendance (HIGH SECURITY) ---
+// --- STUDENT: Mark Attendance ---
 app.post('/api/student/mark-attendance', upload.single('image'), async (req, res) => {
   try {
     const { sessionId, rollNumber, name, department, section, lat, lng, deviceFingerprint } = req.body;
@@ -235,7 +233,7 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       return res.status(403).json({ error: "Session has expired" });
     }
 
-    // 2. Strict Multiple Submissions Block (Proxy Prevention)
+    // 2. Strict Multiple Submissions Block
     const existingEntry = await Attendance.findOne({
       sessionId,
       $or: [ { rollNumber }, { deviceFingerprint } ]
@@ -249,16 +247,17 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       }
     }
 
-    // 3. GPS Radius Validation (WITH INDOOR DRIFT TOLERANCE)
+    // 3. GPS Radius Validation (UPDATED INDOOR DRIFT TOLERANCE)
     const distance = getDistanceInMeters(session.location.lat, session.location.lng, parseFloat(lat), parseFloat(lng));
     
-    // Add 30 meters buffer to account for indoor hardware inaccuracies (Wi-Fi/Cell Tower triangulation drift)
-    const GPS_DRIFT_TOLERANCE = 30; 
+    // Increased buffer to 50 meters to account for heavy concrete labs blocking signals
+    const GPS_DRIFT_TOLERANCE = 50; 
     const effectiveRadius = session.allowedRadius + GPS_DRIFT_TOLERANCE;
 
     if (distance > effectiveRadius) {
+      // Improved error message to reflect the true calculation
       return res.status(403).json({ 
-        error: `Access Denied: You are ${Math.round(distance)}m away. Must be within ${session.allowedRadius}m.` 
+        error: `Access Denied: You are ${Math.round(distance)}m away. Maximum allowed range (including indoor buffer) is ${effectiveRadius}m.` 
       });
     }
 
@@ -292,7 +291,6 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
   }
 });
 
-// --- FACULTY: View Dashboard Segregated (PROTECTED) ---
 app.get('/api/faculty/dashboard/:sessionId', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -327,7 +325,6 @@ app.get('/api/faculty/dashboard/:sessionId', authMiddleware, async (req, res) =>
   }
 });
 
-// --- FACULTY: Export Segregated Attendance to Excel (PROTECTED) ---
 app.get('/api/faculty/export-excel/:sessionId', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.params;
