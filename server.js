@@ -106,7 +106,6 @@ const studentSchema = new mongoose.Schema({
   rollNumber: { type: String, unique: true },
   department: String,
   section: String
-  // faceEmbedding removed as MediaPipe CDN handles liveness on frontend without embeddings
 });
 const Student = mongoose.models.Student || mongoose.model('Student', studentSchema);
 
@@ -237,7 +236,6 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
     }
 
     // 2. Strict Multiple Submissions Block (Proxy Prevention)
-    // Checks if the Device OR the Roll Number has already been used in this exact session.
     const existingEntry = await Attendance.findOne({
       sessionId,
       $or: [ { rollNumber }, { deviceFingerprint } ]
@@ -251,16 +249,22 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       }
     }
 
-    // 3. GPS Radius Validation
+    // 3. GPS Radius Validation (WITH INDOOR DRIFT TOLERANCE)
     const distance = getDistanceInMeters(session.location.lat, session.location.lng, parseFloat(lat), parseFloat(lng));
-    if (distance > session.allowedRadius) {
-      return res.status(403).json({ error: `Access Denied: You are ${Math.round(distance)}m away. Must be within ${session.allowedRadius}m.` });
+    
+    // Add 30 meters buffer to account for indoor hardware inaccuracies (Wi-Fi/Cell Tower triangulation drift)
+    const GPS_DRIFT_TOLERANCE = 30; 
+    const effectiveRadius = session.allowedRadius + GPS_DRIFT_TOLERANCE;
+
+    if (distance > effectiveRadius) {
+      return res.status(403).json({ 
+        error: `Access Denied: You are ${Math.round(distance)}m away. Must be within ${session.allowedRadius}m.` 
+      });
     }
 
     // 4. Cloudinary Night-Vision Upload & Face Validation
     const uploadResult = await uploadBufferToCloudinary(imageBuffer, 'attendance_captures');
-    
-    // Ensure Cloudinary actually sees a face (secondary check to complement frontend MediaPipe)
+
     if (!uploadResult.faces || uploadResult.faces.length === 0) {
       return res.status(400).json({ error: "No face detected in the environment. Please ensure good lighting." });
     }
