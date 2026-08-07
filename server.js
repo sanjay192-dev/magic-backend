@@ -202,7 +202,8 @@ app.post('/api/faculty/start-session', authMiddleware, async (req, res) => {
       department: department || "ALL", 
       section: section || "ALL",
       location: { lat, lng },
-      allowedRadius: allowedRadius || 50, 
+      // Increased default allowedRadius to 100 to prevent false negatives initially
+      allowedRadius: allowedRadius || 100, 
       expiresAt,
       isActive: true
     });
@@ -249,13 +250,12 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
 
     // 3. GPS Radius Validation (UPDATED INDOOR DRIFT TOLERANCE)
     const distance = getDistanceInMeters(session.location.lat, session.location.lng, parseFloat(lat), parseFloat(lng));
-    
-    // Increased buffer to 50 meters to account for heavy concrete labs blocking signals
-    const GPS_DRIFT_TOLERANCE = 50; 
+
+    // Increased buffer to 200 meters to account for heavy concrete labs blocking signals and varied phone hardware
+    const GPS_DRIFT_TOLERANCE = 200; 
     const effectiveRadius = session.allowedRadius + GPS_DRIFT_TOLERANCE;
 
     if (distance > effectiveRadius) {
-      // Improved error message to reflect the true calculation
       return res.status(403).json({ 
         error: `Access Denied: You are ${Math.round(distance)}m away. Maximum allowed range (including indoor buffer) is ${effectiveRadius}m.` 
       });
