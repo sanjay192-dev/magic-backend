@@ -10,21 +10,19 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken'); 
 
 const app = express();
-app.use(express.json({ limit: '10mb' })); // Increased limit for base64/images
+app.use(express.json());
 app.use(cors());
 
-const upload = multer({
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit to prevent memory crashes
-});
+const upload = multer();
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecret_attendance_key';
 
 // ==========================================
-// 1. CLOUDINARY CONFIGURATION (Optimized)
+// 1. CLOUDINARY CONFIGURATION (Face Detection & Enhancement)
 // ==========================================
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || "dppiuypop",
+  api_key: process.env.CLOUDINARY_API_KEY || "412712715735329",
+  api_secret: process.env.CLOUDINARY_API_SECRET || "m04IUY0-awwtr4YoS-1xvxOOIzU",
 });
 
 function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
@@ -32,10 +30,11 @@ function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
     const uploadStream = cloudinary.uploader.upload_stream(
       { 
         folder,
-        faces: true, // Server-side fallback face validation
+        faces: true, 
         transformation: [
-          // REMOVED 'effect: improve' - it causes massive delays and API timeouts under load
-          { crop: "limit", width: 640, height: 640, quality: "auto" } 
+          { effect: "improve" },        
+          { effect: "brightness:30" },  
+          { crop: "limit", width: 800, height: 800 } 
         ]
       },
       (error, result) => {
@@ -50,13 +49,13 @@ function uploadBufferToCloudinary(buffer, folder = 'security_visitors') {
 // ==========================================
 // 2. MONGODB CONNECTION
 // ==========================================
-const MONGO_URL = process.env.MONGO_URL;
+const MONGO_URL = process.env.MONGO_URL || 'mongodb+srv://abc:1234@cluster0.nnjwt12.mongodb.net/security';
 let isConnected = false;
 
 async function connectDB() {
   if (isConnected) return;
   try {
-    await mongoose.connect(MONGO_URL, { maxPoolSize: 50 }); // Higher pool for concurrent student hits
+    await mongoose.connect(MONGO_URL);
     isConnected = true;
     console.log('✅ MongoDB connected');
   } catch (err) {
@@ -75,7 +74,7 @@ app.use(async (req, res, next) => {
 });
 
 // ==========================================
-// 3. SECURITY MIDDLEWARE
+// 3. SECURITY MIDDLEWARE (JWT)
 // ==========================================
 const authMiddleware = (req, res, next) => {
   const authHeader = req.header('Authorization');
@@ -92,7 +91,7 @@ const authMiddleware = (req, res, next) => {
 };
 
 // ==========================================
-// 4. MONGODB SCHEMAS & MODELS (Unchanged)
+// 4. MONGODB SCHEMAS & MODELS
 // ==========================================
 const facultySchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -196,9 +195,7 @@ app.post('/api/faculty/login', async (req, res) => {
 app.post('/api/faculty/start-session', authMiddleware, async (req, res) => {
   try {
     const { department, section, lat, lng, durationMinutes, allowedRadius } = req.body;
-    // Boosted default duration to 10 minutes to account for AI loading times
-    const duration = durationMinutes || 10; 
-    const expiresAt = new Date(Date.now() + duration * 60000);
+    const expiresAt = new Date(Date.now() + (durationMinutes || 5) * 60000);
 
     const session = await Session.create({
       facultyId: req.facultyId, 
@@ -210,12 +207,17 @@ app.post('/api/faculty/start-session', authMiddleware, async (req, res) => {
       isActive: true
     });
 
-    res.status(201).json({ message: "Session started", sessionId: session._id, expiresAt: session.expiresAt });
+    res.status(201).json({
+      message: "Session started successfully",
+      sessionId: session._id,
+      expiresAt: session.expiresAt
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to start session", details: error.message });
   }
 });
 
+// --- STUDENT: Mark Attendance ---
 app.post('/api/student/mark-attendance', upload.single('image'), async (req, res) => {
   try {
     const { sessionId, rollNumber, name, department, section, lat, lng, deviceFingerprint } = req.body;
@@ -224,14 +226,14 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
 
     if (!imageBuffer) return res.status(400).json({ error: "Image file is required" });
 
+    // 1. Session Validations
     const session = await Session.findById(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
-    
-    // Server-side strict timezone comparison
-    if (Date.now() > new Date(session.expiresAt).getTime() || !session.isActive) {
+    if (new Date() > session.expiresAt || !session.isActive) {
       return res.status(403).json({ error: "Session has expired" });
     }
 
+    // 2. Strict Multiple Submissions Block
     const existingEntry = await Attendance.findOne({
       sessionId,
       $or: [ { rollNumber }, { deviceFingerprint } ]
@@ -241,28 +243,36 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
       if (existingEntry.rollNumber === rollNumber) {
         return res.status(409).json({ error: "Attendance already marked for this roll number." });
       } else {
-        return res.status(403).json({ error: "STRICT BLOCK: Device already used for another student." });
+        return res.status(403).json({ error: "STRICT BLOCK: This device has already been used to mark attendance for someone else." });
       }
     }
 
-    // Increased drift tolerance for indoor environments
+    // 3. GPS Radius Validation (UPDATED INDOOR DRIFT TOLERANCE)
     const distance = getDistanceInMeters(session.location.lat, session.location.lng, parseFloat(lat), parseFloat(lng));
-    const GPS_DRIFT_TOLERANCE = 45; 
+    
+    // Increased buffer to 50 meters to account for heavy concrete labs blocking signals
+    const GPS_DRIFT_TOLERANCE = 50; 
     const effectiveRadius = session.allowedRadius + GPS_DRIFT_TOLERANCE;
 
     if (distance > effectiveRadius) {
+      // Improved error message to reflect the true calculation
       return res.status(403).json({ 
-        error: `Location outside allowed radius. You are ${Math.round(distance)}m away. Move closer to the classroom, connect to Wi-Fi, and try again.` 
+        error: `Access Denied: You are ${Math.round(distance)}m away. Maximum allowed range (including indoor buffer) is ${effectiveRadius}m.` 
       });
     }
 
+    // 4. Cloudinary Night-Vision Upload & Face Validation
     const uploadResult = await uploadBufferToCloudinary(imageBuffer, 'attendance_captures');
 
     if (!uploadResult.faces || uploadResult.faces.length === 0) {
-      return res.status(400).json({ error: "No face detected by server. Ensure good lighting." });
+      return res.status(400).json({ error: "No face detected in the environment. Please ensure good lighting." });
+    }
+    if (uploadResult.faces.length > 1) {
+      return res.status(400).json({ error: "Multiple faces detected. Only you should be in the frame." });
     }
 
-    await Attendance.create({
+    // 5. Save Verified Data
+    const attendanceRecord = await Attendance.create({
       sessionId,
       studentName: name,
       rollNumber,
@@ -281,7 +291,6 @@ app.post('/api/student/mark-attendance', upload.single('image'), async (req, res
   }
 });
 
-// (Dashboard & Export routes remain unchanged from your original code)
 app.get('/api/faculty/dashboard/:sessionId', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -313,6 +322,57 @@ app.get('/api/faculty/dashboard/:sessionId', authMiddleware, async (req, res) =>
     });
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch dashboard", details: error.message });
+  }
+});
+
+app.get('/api/faculty/export-excel/:sessionId', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const session = await Session.findById(sessionId);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+
+    const attendees = await Attendance.find({ sessionId }).sort({ department: 1, section: 1, timestamp: 1 });
+    const workbook = new excelJS.Workbook();
+    const departments = [...new Set(attendees.map(a => a.department))];
+
+    departments.forEach(dept => {
+      const worksheet = workbook.addWorksheet(`${dept} Attendance`);
+      worksheet.columns = [
+        { header: 'S.No', key: 'sno', width: 10 },
+        { header: 'Name', key: 'name', width: 25 },
+        { header: 'Roll Number', key: 'rollNumber', width: 20 },
+        { header: 'Section', key: 'section', width: 15 },
+        { header: 'Date', key: 'date', width: 15 },
+        { header: 'Time', key: 'time', width: 15 }
+      ];
+      worksheet.getRow(1).eachCell((cell) => { cell.font = { bold: true }; });
+
+      let sno = 1;
+      attendees.forEach((attendee) => {
+        if (attendee.department === dept) {
+          const attendanceDate = new Date(attendee.timestamp);
+          worksheet.addRow({
+            sno: sno++,
+            name: attendee.studentName,
+            rollNumber: attendee.rollNumber,
+            section: attendee.section,
+            date: attendanceDate.toLocaleDateString(),
+            time: attendanceDate.toLocaleTimeString()
+          });
+        }
+      });
+    });
+
+    if (departments.length === 0) workbook.addWorksheet('Empty Session');
+
+    const fileName = `Session_${sessionId.toString().substring(0,6)}_Attendance.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=${fileName}`);
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    res.status(500).json({ error: "Failed to export Excel sheet", details: error.message });
   }
 });
 
